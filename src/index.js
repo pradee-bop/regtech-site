@@ -40,44 +40,44 @@ async function handleContact(request, env) {
     return json({ ok: true });
   }
 
-  const name = sanitize(data.name);
+  // Support both new field names and legacy (first_name/last_name/phone) form
+  const firstName = sanitize(data.first_name);
+  const lastName = sanitize(data.last_name);
+  const combinedName = [firstName, lastName].filter(Boolean).join(" ");
+  const name = sanitize(data.name) || combinedName;
   const email = sanitize(data.email);
   const company = sanitize(data.company);
+  const phone = sanitize(data.phone);
   const message = sanitize(data.message);
 
   if (!name || !email || !message) {
-    return json({ ok: false, error: "Name, email, and message are required" }, 400);
+    return json({ ok: false, error: "Missing required fields" }, 400);
   }
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     return json({ ok: false, error: "Invalid email address" }, 400);
   }
 
-  const subject = `New inquiry from ${name}${company ? " (" + company + ")" : ""}`;
-  const text =
-`New contact form submission
+  const subject = `New inquiry from ${name}`;
+  const lines = [
+    `Name: ${name}`,
+    `Email: ${email}`,
+  ];
+  if (phone) lines.push(`Phone: ${phone}`);
+  if (company) lines.push(`Company: ${company}`);
+  lines.push("", "Message:", message);
+  const text = lines.join("\n");
 
-Name:    ${name}
-Email:   ${email}
-Company: ${company || "(not provided)"}
+  const html = `
+    <h2>New inquiry from ${escapeHtml(name)}</h2>
+    <p><strong>Email:</strong> ${escapeHtml(email)}</p>
+    ${phone ? `<p><strong>Phone:</strong> ${escapeHtml(phone)}</p>` : ""}
+    ${company ? `<p><strong>Company:</strong> ${escapeHtml(company)}</p>` : ""}
+    <p><strong>Message:</strong></p>
+    <p>${escapeHtml(message).replace(/\n/g, "<br/>")}</p>
+  `;
 
-Message:
-${message}
-`;
-
-  const html = `<!doctype html>
-<html><body style="font-family:system-ui,sans-serif;line-height:1.5;color:#111">
-  <h2 style="margin:0 0 12px">New contact form submission</h2>
-  <table cellpadding="6" style="border-collapse:collapse">
-    <tr><td><strong>Name</strong></td><td>${escapeHtml(name)}</td></tr>
-    <tr><td><strong>Email</strong></td><td><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></td></tr>
-    <tr><td><strong>Company</strong></td><td>${escapeHtml(company) || "<em>(not provided)</em>"}</td></tr>
-  </table>
-  <h3 style="margin:18px 0 6px">Message</h3>
-  <p style="white-space:pre-wrap;margin:0">${escapeHtml(message)}</p>
-</body></html>`;
-
-  const res = await fetch("https://api.resend.com/emails", {
+  const resp = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${env.RESEND_API_KEY}`,
@@ -93,9 +93,9 @@ ${message}
     }),
   });
 
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    console.error("Resend error", res.status, detail);
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    console.log("Resend error", resp.status, errText);
     return json({ ok: false, error: "Failed to send message" }, 502);
   }
 
@@ -103,16 +103,17 @@ ${message}
 }
 
 function sanitize(v) {
-  return (typeof v === "string" ? v : "").trim().slice(0, 5000);
+  if (v == null) return "";
+  return String(v).trim().slice(0, 5000);
 }
 
 function escapeHtml(s) {
   return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function json(body, status = 200) {
