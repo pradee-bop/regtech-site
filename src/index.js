@@ -1,8 +1,10 @@
 // Cloudflare Worker entry: handles POST /api/contact via Resend,
-// falls through to static assets for everything else.
+// with Turnstile verification + honeypot, falls through to static assets.
 
 const TO_ADDRESS = "contact@regtechservices.team";
 const FROM_ADDRESS = "RegTech Services <noreply@regtechservices.team>";
+const TURNSTILE_VERIFY_URL =
+  "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 export default {
   async fetch(request, env, ctx) {
@@ -12,7 +14,6 @@ export default {
       return handleContact(request, env);
     }
 
-    // Everything else -> static assets
     return env.ASSETS.fetch(request);
   },
 };
@@ -20,6 +21,9 @@ export default {
 async function handleContact(request, env) {
   if (!env.RESEND_API_KEY) {
     return json({ ok: false, error: "Email service not configured" }, 503);
+  }
+  if (!env.TURNSTILE_SECRET_KEY) {
+    return json({ ok: false, error: "Bot protection not configured" }, 503);
   }
 
   let data;
@@ -40,7 +44,42 @@ async function handleContact(request, env) {
     return json({ ok: true });
   }
 
-  // Support both new field names and legacy (first_name/last_name/phone) form
+  // Turnstile verification
+  const token = sanitize(data["cf-turnstile-response"]);
+  if (!token) {
+    return json({ ok: false, error: "Captcha missing. Please try again." }, 400);
+  }
+  const remoteip =
+    request.headers.get("CF-Connecting-IP") ||
+    request.headers.get("X-Forwarded-For") ||
+    "";
+  const verifyBody = new URLSearchParams();
+  verifyBody.set("secret", env.TURNSTILE_SECRET_KEY);
+  verifyBody.set("response", token);
+  if (remoteip) verifyBody.set("remoteip", remoteip);
+  let verifyOk = false;
+  let verifyErrors = "";
+  try {
+    const vr = await fetch(TURNSTILE_VERIFY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: verifyBody.toString(),
+    });
+    const vd = await vr.json();
+    verifyOk = !!vd.success;
+    verifyErrors = (vd["error-codes"] || []).join(",");
+  } catch (e) {
+    console.log("Turnstile verify fetch failed", String(e));
+  }
+  if (!verifyOk) {
+    console.log("Turnstile verification failed", verifyErrors);
+    return json(
+      { ok: false, error: "Captcha verification failed. Please try again." },
+      403
+    );
+  }
+
+  // Support both new field names and legacy form (first_name/last_name/phone)
   const firstName = sanitize(data.first_name);
   const lastName = sanitize(data.last_name);
   const combinedName = [firstName, lastName].filter(Boolean).join(" ");
@@ -59,10 +98,7 @@ async function handleContact(request, env) {
   }
 
   const subject = `New inquiry from ${name}`;
-  const lines = [
-    `Name: ${name}`,
-    `Email: ${email}`,
-  ];
+  const lines = [`Name: ${name}`, `Email: ${email}`];
   if (phone) lines.push(`Phone: ${phone}`);
   if (company) lines.push(`Company: ${company}`);
   lines.push("", "Message:", message);
